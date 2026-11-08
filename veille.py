@@ -48,7 +48,11 @@ LEGAL_KEYWORDS = [
 
 # Actus : on ecarte les directs, le sport, les faits divers et le people
 SKIP_TITLE = re.compile(r"^\s*(en direct|direct|live|vidéo|diaporama)\b", re.I)
-SKIP_URL = re.compile(r"/(sports?|faits-divers|people|jeux|horoscope|meteo)(/|-|$)", re.I)
+SKIP_URL = re.compile(
+    r"avis-vin\.|/(sports?|faits-divers|people|jeux|horoscope|meteo|gastronomie|vins?|mode|"
+    r"voyages?|shopping|bien-etre|lifestyle|culture|cinema|musique|tv)(/|-|$)",
+    re.I,
+)
 
 MAIL_TO = os.environ.get("MAIL_TO") or "mathis.miallet89@gmail.com"
 SENT_FILE = Path(__file__).parent / "sent.json"
@@ -246,25 +250,28 @@ def send_mail(subject, text, html):
     last_error = None
     # Deux voies : SSL 465 puis STARTTLS 587 (Gmail coupe parfois l'une des deux)
     for mode, port in (("ssl", 465), ("starttls", 587)):
-        try:
-            if mode == "ssl":
-                server = smtplib.SMTP_SSL("smtp.gmail.com", port, context=ctx, timeout=30)
-            else:
-                server = smtplib.SMTP("smtp.gmail.com", port, timeout=30)
-                server.ehlo()
-                server.starttls(context=ctx)
-                server.ehlo()
-            with server:
-                server.login(user, password)
-                server.send_message(msg)
-            print(f"Connexion Gmail OK ({mode} {port})")
-            return
-        except smtplib.SMTPAuthenticationError as exc:
-            print(f"[Gmail refuse la connexion, {mode} {port}] code {exc.smtp_code}", file=sys.stderr)
-            last_error = exc
-        except (smtplib.SMTPException, OSError) as exc:
-            print(f"[Gmail erreur, {mode} {port}] {type(exc).__name__}: {exc}", file=sys.stderr)
-            last_error = exc
+        for mech in ("auto", "LOGIN"):
+            try:
+                if mode == "ssl":
+                    server = smtplib.SMTP_SSL("smtp.gmail.com", port, context=ctx, timeout=30)
+                else:
+                    server = smtplib.SMTP("smtp.gmail.com", port, timeout=30)
+                    server.ehlo()
+                    server.starttls(context=ctx)
+                    server.ehlo()
+                with server:
+                    if mech == "LOGIN":
+                        server.esmtp_features["auth"] = "LOGIN"
+                    server.login(user, password)
+                    server.send_message(msg)
+                print(f"Connexion Gmail OK ({mode} {port} {mech})")
+                return
+            except smtplib.SMTPAuthenticationError as exc:
+                print(f"[Gmail refuse la connexion, {mode} {port} {mech}] code {exc.smtp_code}", file=sys.stderr)
+                last_error = exc
+            except (smtplib.SMTPException, OSError) as exc:
+                print(f"[Gmail erreur, {mode} {port} {mech}] {type(exc).__name__}: {exc}", file=sys.stderr)
+                last_error = exc
     print(f"Longueur identifiant: {len(user)}, longueur cle: {len(password)} (attendu: 16)", file=sys.stderr)
     raise last_error
 
