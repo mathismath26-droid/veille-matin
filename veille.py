@@ -54,6 +54,16 @@ SKIP_URL = re.compile(
     re.I,
 )
 
+# Consigne a coller dans NotebookLM (Audio Overview, Personnaliser)
+NOTEBOOK_PROMPT = (
+    "Débat en français entre deux animateurs aux avis opposés, ton oral et naturel, "
+    "sans parti pris politique. Trois parties annoncées clairement avec une vraie "
+    "transition : 1) Actualité (les 3 premiers articles, un angle différent par "
+    "animateur), 2) Légal et micro-entreprise (impact concret pour un "
+    "micro-entrepreneur : charges, TVA, obligations), 3) Web et SEO (ce qu'il faut "
+    "surveiller ou changer sur un site). Finis par 3 points à retenir."
+)
+
 MAIL_TO = os.environ.get("MAIL_TO") or "mathis.miallet89@gmail.com"
 SENT_FILE = Path(__file__).parent / "sent.json"
 MAX_SENT = 300
@@ -230,8 +240,17 @@ def build_mail(sections, today):
         "colle les liens ci-dessous, puis Audio Overview.</p>"
     )
     html.append("<pre>" + escape("\n".join(links)) + "</pre>")
+    html.append("<p><b>Consigne à coller dans Personnaliser :</b></p>")
+    html.append(
+        '<pre style="white-space:pre-wrap;font-family:inherit">'
+        + escape(NOTEBOOK_PROMPT)
+        + "</pre>"
+    )
     text.append("LIENS A COLLER DANS NOTEBOOKLM")
     text.extend(links)
+    text.append("")
+    text.append("CONSIGNE A COLLER DANS PERSONNALISER")
+    text.append(NOTEBOOK_PROMPT)
     return "\n".join(text), "\n".join(html), links
 
 
