@@ -8,9 +8,10 @@ import re
 import smtplib
 import ssl
 import sys
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from html import escape
 from pathlib import Path
@@ -29,17 +30,25 @@ NEWS_FEEDS = [
 
 # Legal / micro-entreprise : le plus recent parmi ces flux
 LEGAL_FEEDS = [
-    ("Service-public Entreprendre", "https://entreprendre.service-public.fr/rss"),
     ("Service-public pro", "https://www.service-public.fr/abonnements/rss/actu-actu-pro.rss"),
-    ("URSSAF", "https://www.urssaf.fr/accueil/rss.xml"),
 ]
 
 # Web / SEO : le plus recent parmi ces flux
 SEO_FEEDS = [
     ("Google Search Central", "https://developers.google.com/search/blog/feed.xml"),
-    ("Search Engine Land", "https://searchengineland.com/feed"),
     ("Abondance", "https://www.abondance.com/feed"),
 ]
+
+# Legal : un article qui parle de ces sujets (publie depuis moins de 10 jours) passe en premier
+LEGAL_KEYWORDS = [
+    "micro-entre", "auto-entre", "micro-entrepr", "facturation électronique",
+    "facture électronique", "tva", "urssaf", "cotisation", "cfe", "budget",
+    "loi de finances", "plafond", "seuil", "indépendant",
+]
+
+# Actus : on ecarte les directs, le sport, les faits divers et le people
+SKIP_TITLE = re.compile(r"^\s*(en direct|direct|live|vidéo|diaporama)\b", re.I)
+SKIP_URL = re.compile(r"/(sports?|faits-divers|people|jeux|horoscope|meteo)(/|-|$)", re.I)
 
 MAIL_TO = os.environ.get("MAIL_TO") or "mathis.miallet89@gmail.com"
 SENT_FILE = Path(__file__).parent / "sent.json"
@@ -78,6 +87,18 @@ def local(tag):
     return tag.rsplit("}", 1)[-1]
 
 
+TRACKING = re.compile(r"^(xtor|at_.*|utm_.*|fbclid|gclid)$", re.I)
+
+
+def clean_link(url):
+    """Retire fragment et parametres de suivi (xtor, utm, at_...)."""
+    parts = urllib.parse.urlsplit(url)
+    query = [(k, v) for k, v in urllib.parse.parse_qsl(parts.query) if not TRACKING.match(k)]
+    return urllib.parse.urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, urllib.parse.urlencode(query), "")
+    )
+
+
 def read_feed(name, url):
     """Retourne une liste de dicts {source, title, link, date}. Liste vide si erreur."""
     try:
@@ -100,7 +121,12 @@ def read_feed(name, url):
                 date = child.text or ""
         if title and link:
             items.append(
-                {"source": name, "title": title, "link": link, "date": parse_date(date)}
+                {
+                    "source": name,
+                    "title": title,
+                    "link": clean_link(link),
+                    "date": parse_date(date),
+                }
             )
     print(f"[flux OK] {name} : {len(items)} articles")
     return items
@@ -134,9 +160,11 @@ def save_sent(sent):
     )
 
 
-def pick(items, sent):
+def pick(items, sent, news=False):
     for it in items:
         if it["link"] in sent:
+            continue
+        if news and (SKIP_TITLE.search(it["title"]) or SKIP_URL.search(it["link"])):
             continue
         if is_paywalled(it["link"]):
             print(f"[payant, ignore] {it['link']}")
@@ -151,14 +179,23 @@ def build_selection(sent):
     news = []
     for name, url in NEWS_FEEDS:
         items = sorted(read_feed(name, url), key=lambda x: x["date"], reverse=True)
-        news.append(pick(items, sent))
+        news.append(pick(items, sent, news=True))
     sections.append(("Actualité", news, [n for n, _ in NEWS_FEEDS]))
 
-    for label, feeds in (("Légal et micro-entreprise", LEGAL_FEEDS), ("Web et SEO", SEO_FEEDS)):
+    recent = datetime.now(timezone.utc) - timedelta(days=10)
+
+    def legal_key(it):
+        hit = any(k in it["title"].lower() for k in LEGAL_KEYWORDS)
+        return (hit and it["date"] >= recent, it["date"])
+
+    for label, feeds, key in (
+        ("Légal et micro-entreprise", LEGAL_FEEDS, legal_key),
+        ("Web et SEO", SEO_FEEDS, lambda it: it["date"]),
+    ):
         items = []
         for name, url in feeds:
             items += read_feed(name, url)
-        items.sort(key=lambda x: x["date"], reverse=True)
+        items.sort(key=key, reverse=True)
         sections.append((label, [pick(items, sent)], [n for n, _ in feeds]))
 
     return sections
@@ -195,17 +232,41 @@ def build_mail(sections, today):
 
 
 def send_mail(subject, text, html):
-    user = os.environ["GMAIL_USER"]
-    password = os.environ["GMAIL_APP_PASSWORD"].replace(" ", "")
+    # strip() : un espace ou retour a la ligne colle dans le secret fait echouer la connexion
+    user = os.environ["GMAIL_USER"].strip()
+    password = "".join(os.environ["GMAIL_APP_PASSWORD"].split())
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = user
     msg["To"] = MAIL_TO
     msg.set_content(text)
     msg.add_alternative(html, subtype="html")
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ssl.create_default_context()) as s:
-        s.login(user, password)
-        s.send_message(msg)
+
+    ctx = ssl.create_default_context()
+    last_error = None
+    # Deux voies : SSL 465 puis STARTTLS 587 (Gmail coupe parfois l'une des deux)
+    for mode, port in (("ssl", 465), ("starttls", 587)):
+        try:
+            if mode == "ssl":
+                server = smtplib.SMTP_SSL("smtp.gmail.com", port, context=ctx, timeout=30)
+            else:
+                server = smtplib.SMTP("smtp.gmail.com", port, timeout=30)
+                server.ehlo()
+                server.starttls(context=ctx)
+                server.ehlo()
+            with server:
+                server.login(user, password)
+                server.send_message(msg)
+            print(f"Connexion Gmail OK ({mode} {port})")
+            return
+        except smtplib.SMTPAuthenticationError as exc:
+            print(f"[Gmail refuse la connexion, {mode} {port}] code {exc.smtp_code}", file=sys.stderr)
+            last_error = exc
+        except (smtplib.SMTPException, OSError) as exc:
+            print(f"[Gmail erreur, {mode} {port}] {type(exc).__name__}: {exc}", file=sys.stderr)
+            last_error = exc
+    print(f"Longueur identifiant: {len(user)}, longueur cle: {len(password)} (attendu: 16)", file=sys.stderr)
+    raise last_error
 
 
 def main():
